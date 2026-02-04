@@ -95,11 +95,15 @@ class ActivationNetwork:
         
         return activation
     
-    def retrieve(self, cues: List[str], top_k: int = 5) -> List[dict]:
+    def retrieve(self, cues: List[str], top_k: int = 5, context: dict = None) -> List[dict]:
         """
         Retrieve memories most activated by cues.
+        
+        Two-stage retrieval (from TheLordOfTheDance):
+        1. Cheap activation nominates candidates
+        2. Prediction-error × utility gates deliberate retrieval
         """
-        # Spread activation
+        # Stage 1: Spread activation (cheap nomination)
         activation = self.spread_activation(cues)
         
         # Score memories by total activation of their concepts
@@ -109,17 +113,56 @@ class ActivationNetwork:
             for memory_id in self.concept_to_memories.get(concept, []):
                 memory_scores[memory_id] = memory_scores.get(memory_id, 0) + level
         
-        # Sort by score
-        ranked = sorted(memory_scores.items(), key=lambda x: -x[1])
+        # Stage 2: Prediction-error × utility scoring
+        # Prediction error: how surprising is this memory given current context?
+        # Utility: how useful is this memory for current task?
+        final_scores = {}
+        for memory_id, activation_score in memory_scores.items():
+            memory = self.memories[memory_id]
+            
+            # Prediction error: salience is a proxy (high salience = was surprising)
+            prediction_error = memory.get("salience", 0.5)
+            
+            # Utility: overlap with current context/cues
+            utility = self._compute_utility(memory, cues, context)
+            
+            # Combined score: activation nominates, prediction_error × utility decides
+            final_scores[memory_id] = activation_score * (prediction_error * utility)
+        
+        # Sort by final score
+        ranked = sorted(final_scores.items(), key=lambda x: -x[1])
         
         # Return top memories with scores
         results = []
         for memory_id, score in ranked[:top_k]:
             memory = self.memories[memory_id].copy()
             memory["retrieval_score"] = score
+            memory["activation_only"] = memory_scores.get(memory_id, 0)
             results.append(memory)
         
         return results
+    
+    def _compute_utility(self, memory: dict, cues: List[str], context: dict = None) -> float:
+        """
+        Compute utility of memory for current task.
+        
+        Higher utility = more relevant to what we're trying to do.
+        """
+        utility = 0.5  # Base
+        
+        # Check schema type alignment
+        if context and context.get("task_type"):
+            if memory.get("schema") == context.get("task_type"):
+                utility += 0.3
+        
+        # Check for direct cue matches in core fields
+        core = memory.get("core", {})
+        core_text = " ".join(str(v) for v in core.values()).lower()
+        for cue in cues:
+            if cue.lower() in core_text:
+                utility += 0.1
+        
+        return min(1.0, utility)
 
 
 # Test

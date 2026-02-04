@@ -65,6 +65,7 @@ class MemoryNetwork:
     def _build_associations(self, new_memory: dict):
         """
         Build associations between new memory and existing ones.
+        Also implements memory evolution from A-MEM: new memories can update old ones.
         
         Association types:
         - Same schema type (weak: 0.3)
@@ -87,7 +88,8 @@ class MemoryNetwork:
             # Shared core field values
             new_core = new_memory.get("core", {})
             old_core = existing.get("core", {})
-            for key in set(new_core.keys()) & set(old_core.keys()):
+            shared_fields = set(new_core.keys()) & set(old_core.keys())
+            for key in shared_fields:
                 if new_core[key] == old_core[key]:
                     weight += 0.5
             
@@ -101,20 +103,35 @@ class MemoryNetwork:
                     "id": existing_id,
                     "weight": weight
                 })
+                
+                # Memory evolution (from A-MEM): new memories reinforce old ones
+                # If strongly related, boost salience of old memory
+                if weight >= 0.5:
+                    old_salience = existing.get("salience", 0.5)
+                    existing["salience"] = min(1.0, old_salience + 0.1)
+                    existing.setdefault("reinforced_by", []).append(new_id)
     
-    def retrieve(self, cue: str, top_k: int = 5, decay: float = 0.7) -> List[dict]:
+    def retrieve(self, cue: str, top_k: int = 5, decay: float = 0.7, 
+                 inhibition_threshold: float = 0.3, temporal_decay: bool = True) -> List[dict]:
         """
         Retrieve memories via spreading activation.
         
+        Enhanced with insights from SYNAPSE paper:
         1. Find memories matching the cue (initial activation = 1.0)
         2. Spread activation through edges (with decay)
-        3. Return top-k by activation level
+        3. Apply lateral inhibition (suppress weak activations)
+        4. Apply temporal decay (older = less accessible)
+        5. Return top-k by activation level
         
         Args:
             cue: Search term (concept, name, or keyword)
             top_k: Number of results to return
             decay: How much activation decreases per hop (0-1)
+            inhibition_threshold: Suppress activations below this (lateral inhibition)
+            temporal_decay: Apply time-based accessibility decay
         """
+        from datetime import datetime
+        
         # Initial activation from cue
         activation = defaultdict(float)
         
@@ -147,6 +164,24 @@ class MemoryNetwork:
                     new_activation[target_id] = max(new_activation[target_id], spread)
             
             activation = new_activation
+        
+        # Lateral inhibition: suppress weak activations (from SYNAPSE)
+        activation = {mid: act for mid, act in activation.items() 
+                      if act >= inhibition_threshold}
+        
+        # Temporal decay: older memories less accessible (from SYNAPSE)
+        if temporal_decay:
+            now = datetime.now()
+            for mid in activation:
+                memory = self.nodes[mid]
+                try:
+                    created = datetime.fromisoformat(memory.get("timestamp", ""))
+                    age_hours = (now - created).total_seconds() / 3600
+                    # Decay factor: halve activation every 24 hours
+                    time_factor = 0.5 ** (age_hours / 24)
+                    activation[mid] *= max(0.1, time_factor)  # Floor at 0.1
+                except:
+                    pass  # No timestamp, no decay
         
         # Sort by activation, return top_k
         sorted_memories = sorted(
